@@ -55,9 +55,8 @@ It could be implemented as a (joined?) table in the same database as the files c
 If the reference count of a chunk reaches `0`,
 we can delete it from storage as it isn't used by a backup anymore.
 
-Before making a backup pass and using this cache,
-we might want to check if all chunks are still available on storage.
-Although it might be simpler to initially assume that storage is only modified by us.
+When making a backup pass and hitting the files cache,
+we need to check that all chunks are still available on storage.
 
 ## Backup Archive
 
@@ -70,6 +69,7 @@ and is written to the storage after a successful backup run.
   * URI (includes authority and storage volume)
   * relative path
   * name
+  * file size
   * ordered list of chunk IDs (to re-assemble the file)
 * timeStart - when the backup run was started
 * timeEnd - when the backup run was finished
@@ -90,24 +90,28 @@ and `~10sec` for *all* of `ExternalStorageProvider`
 (which is unlikely to happen, because the entire storage volume cannot be selected on Android 11).
 
 All files will be processed with every backup run.
-If a file is found in the cache, it is checked if its attributes have not been modified
-and all its chunks have been backed up.
+If a file is found in the cache, it is checked
+if its content-modification-indicating attributes have not been modified
+and all its chunks are still present in the backup storage.
+We might be able to speed up the latter check by initially retrieving a list of all chunks.
+
 For present unchanged files, an entry will be added to the backup metadata
 and the TTL in the files cache updated.
 If a file is not found in cache an entry will be added for it.
-Missing or modified files will be put through a chunker
+New and modified files will be put through a chunker
 which splits up larger files into smaller chunks.
 Initially, the chunker might just return a single chunk,
 the file itself, to simplify the operation.
 
-A chunk is hashed (or MACed),
-then encrypted and written to backup storage, if it is not already present.
+A chunk is hashed (with a key / MACed),
+then (compressed and) encrypted (with authentication) and written to backup storage,
+if it is not already present.
 New chunks get added to the chunks cache.
 Only after the backup has completed and the backup archive was written,
 the reference counters of the included chunks will be incremented.
 
 When all chunks of a file have either been written or were present already,
-the file item is added to the backup archive with all its chunks and other metadata.
+the file item is added to the backup archive with its list of chunk IDs and other metadata.
 
 When all files have been processed, the backup archive is finalized and written to storage.
 
@@ -116,17 +120,18 @@ Chunks uploaded during the failed run should still be available in storage
 and the cache with reference count `0` providing an auto-resume.
 
 After a successful backup, chunks that still have reference count `0`
-can be deleted from storage and cache.
+can be deleted from storage and cache without risking to delete chunks that will be needed later.
 
 ## Removing old backups
 
 Ideally, the user can decide how many backups should be kept based on available storage capacity.
 These could be a number in the yearly/monthly/weekly/daily categories.
-However, initially, we will probably only keep the last `X` backups and delete the rest.
+However, initially, we might simply auto-prune backups older than a month,
+if there have been at least 3 backups within that month (or some similar scheme).
 
 After doing a successful backup run, is a good time to prune old backups.
 To determine which backups to delete, the backup archives need to be downloaded and inspected.
-Maybe their file name can be the `timeEnd` timestamp to help with that task.
+Maybe their file name can be the `timeStart` timestamp to help with that task.
 If a backup is selected for deletion, the reference counter of all included chunks is decremented.
 The backup archive file and chunks with reference count of `0` are deleted from storage.
 
@@ -134,13 +139,25 @@ The backup archive file and chunks with reference count of `0` are deleted from 
 
 When the user wishes to restore a backup, they select the backup archive that should be used.
 The selection can be done based on time and name.
-We go through the list of files in the archive, download and decrypt each chunk of the file
+We go through the list of files in the archive,
+download, authenticate, decrypt (and decompress) each chunk of the file
 and re-assemble the file this way.
-The file will be placed into the same directory under the same name.
+Once we have the original chunk,
+we might want to re-calculate the chunk ID to check if it is as expected.
+The file will be placed into the same directory under the same name
+with its attributes (e.g. lastModified) restored as much as possible.
 
-* TODO: What do we do if one of the same name already exists?
-* TODO: What to we do if restore failed in-between (e.g. network failure)?
-* TODO: Do we re-set the lastModified timestamp of restored files to that from backup?
+If a file already exists with the that name and path,
+we check if the file is identical to the one we want to restore
+and move to the next if it is indeed identical.
+If it is not identical, we could rely on Android's Storage Access Framework
+to automatically give it a `(1)` suffix when writing it to disk.
+Normally, restores are expected to happen to a clean file system anyway.
+
+However, if a restore fails, the above behavior should give us a seamless auto-resume experience.
+The user can re-try the restore and it will quickly skip already restored files
+and continue to download the ones that are still missing.
+
 # Out-of-Scope
 
 The following features would be nice to have,
@@ -148,4 +165,4 @@ but are considered out-of-scope of the current design for time and budget reason
 
 * compression (we initially assume that most files are already sufficiently compressed)
 * external secret-less corruption checks that would use checksums over encrypted data
-
+* supporting different backup clients backing up to the same storage
