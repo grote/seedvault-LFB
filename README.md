@@ -71,6 +71,7 @@ and is written to the storage after a successful backup run.
   * name
   * file size
   * ordered list of chunk IDs (to re-assemble the file)
+* total size - sum of the size of all files, for stats
 * timeStart - when the backup run was started
 * timeEnd - when the backup run was finished
 
@@ -143,12 +144,15 @@ We go through the list of files in the archive,
 download, authenticate, decrypt (and decompress) each chunk of the file
 and re-assemble the file this way.
 Once we have the original chunk,
-we might want to re-calculate the chunk ID to check if it is as expected.
-The file will be placed into the same directory under the same name
+we might want to re-calculate the chunk ID to check if it is as expected
+to prevent an attacker from swapping chunks.
+This could also be achieved by including the chunk ID in the authenticated encryption (e.g. AEAD).
+The re-assembled file will be placed into the same directory under the same name
 with its attributes (e.g. lastModified) restored as much as possible.
 
 If a file already exists with the that name and path,
 we check if the file is identical to the one we want to restore
+(by relying on file metadata or re-computing chunk IDs)
 and move to the next if it is indeed identical.
 If it is not identical, we could rely on Android's Storage Access Framework
 to automatically give it a `(1)` suffix when writing it to disk.
@@ -158,6 +162,11 @@ However, if a restore fails, the above behavior should give us a seamless auto-r
 The user can re-try the restore and it will quickly skip already restored files
 and continue to download the ones that are still missing.
 
+After all files have been written to a directory,
+we might want to attempt to restore its metadata (and flags?) as well.
+
+TODO: figure out how to get the directories of `MediaStore` files.
+
 # Out-of-Scope
 
 The following features would be nice to have,
@@ -166,3 +175,17 @@ but are considered out-of-scope of the current design for time and budget reason
 * compression (we initially assume that most files are already sufficiently compressed)
 * external secret-less corruption checks that would use checksums over encrypted data
 * supporting different backup clients backing up to the same storage
+
+# Known issues
+
+## Changes to files can not be detected reliably
+
+Changes can be detected using file size and lastModified timestamps.
+These have only a precision of seconds,
+so we can't detect a changes happening within a second of a first change.
+Also other apps can reset the lastModified timestamp
+preventing us from registering a change if the file size doesn't change.
+On Android 11, media files have a generation counter that gets incremented when files changes
+to help with this issue.
+However, files on external storage still don't have anything similar
+and usually also don't trigger `ContentObserver` notifications.
