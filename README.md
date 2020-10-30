@@ -9,72 +9,6 @@ Apps and their data are explicitly out of scope
 as this is handled already by the Android backup system.
 Techniques introduced here might be applied to app backups in the future.
 
-# Data structures
-
-## Local caches
-
-### Files cache
-
-This cache is needed to quickly look up if a file has changed and if we have all of its chunks.
-It will probably implemented as a sqlite-based Room database.
-
-Contents:
-
-* URI (stripped by scheme and authority?) (`String` with index for fast lookups)
-* file size (`Long`)
-* last modified in milliseconds (`Long`)
-* generation added (MediaStore only) (`Long`)
-* generation modified (MediaStore only) (`Long`)
-* list of chunk IDs representing the file's contents
-* last seen in milliseconds (`Long`) or TTL counter (`Integer`)
-
-If the file's size, last modified timestamp (and generation) is still the same,
-it is considered to not have changed.
-In that case, we check that all file content chunks are (still) present in storage.
-
-If the file has not changed and all chunks are present,
-the file is not read/chunked/hashed again.
-Only a file metadata item is added to backup metadata.
-
-As the cache grows over time, we need a way to evict files eventually.
-This could happen by checking a last seen timestamp or by using a TTL counter
-or maybe even a boolean flag that gets checked after a successful pass over all files.
-A flag might not be ideal if the user adds/removes folder as backup targets.
-
-### Chunks cache
-
-This is used to determine whether we already have a chunk,
-to count references to it and also for statistics.
-
-It could be implemented as a (joined?) table in the same database as the files cache.
-
-* chunk ID (probably a hash/mac)
-* reference count
-* size
-
-If the reference count of a chunk reaches `0`,
-we can delete it from storage as it isn't used by a backup anymore.
-
-When making a backup pass and hitting the files cache,
-we need to check that all chunks are still available on storage.
-
-## Backup Archive
-
-The backup archive contains metadata about a single backup
-and is written to the storage after a successful backup run.
-
-* version - the backup version
-* name - a name of the backup
-* files - a list of all files in this backup
-  * URI (includes authority and storage volume)
-  * relative path
-  * name
-  * file size
-  * ordered list of chunk IDs (to re-assemble the file)
-* total size - sum of the size of all files, for stats
-* timeStart - when the backup run was started
-* timeEnd - when the backup run was finished
-
 # Operations
 
 ## Making a backup
@@ -166,6 +100,72 @@ After all files have been written to a directory,
 we might want to attempt to restore its metadata (and flags?) as well.
 
 TODO: figure out how to get the directories of `MediaStore` files.
+
+# Data structures
+
+## Local caches
+
+### Files cache
+
+This cache is needed to quickly look up if a file has changed and if we have all of its chunks.
+It will probably implemented as a sqlite-based Room database.
+
+Contents:
+
+* URI (stripped by scheme and authority?) (`String` with index for fast lookups)
+* file size (`Long`)
+* last modified in milliseconds (`Long`)
+* generation added (MediaStore only) (`Long`)
+* generation modified (MediaStore only) (`Long`)
+* list of chunk IDs representing the file's contents
+* last seen in milliseconds (`Long`) or TTL counter (`Integer`)
+
+If the file's size, last modified timestamp (and generation) is still the same,
+it is considered to not have changed.
+In that case, we check that all file content chunks are (still) present in storage.
+
+If the file has not changed and all chunks are present,
+the file is not read/chunked/hashed again.
+Only a file metadata item is added to backup metadata.
+
+As the cache grows over time, we need a way to evict files eventually.
+This could happen by checking a last seen timestamp or by using a TTL counter
+or maybe even a boolean flag that gets checked after a successful pass over all files.
+A flag might not be ideal if the user adds/removes folder as backup targets.
+
+### Chunks cache
+
+This is used to determine whether we already have a chunk,
+to count references to it and also for statistics.
+
+It could be implemented as a (joined?) table in the same database as the files cache.
+
+* chunk ID (probably a hash/mac)
+* reference count
+* size
+
+If the reference count of a chunk reaches `0`,
+we can delete it from storage as it isn't used by a backup anymore.
+
+When making a backup pass and hitting the files cache,
+we need to check that all chunks are still available on storage.
+
+## Backup Archive
+
+The backup archive contains metadata about a single backup
+and is written to the storage after a successful backup run.
+
+* version - the backup version
+* name - a name of the backup
+* files - a list of all files in this backup
+  * URI (includes authority and storage volume)
+  * relative path
+  * name
+  * file size
+  * ordered list of chunk IDs (to re-assemble the file)
+* total size - sum of the size of all files, for stats
+* timeStart - when the backup run was started
+* timeEnd - when the backup run was finished
 
 # Out-of-Scope
 
