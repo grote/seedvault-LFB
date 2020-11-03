@@ -119,7 +119,12 @@ The derived key has 512 bits
 and Seedvault uses the first 256 bits as an AES key to encrypt app data (out of scope here).
 This key's usage is limited by Android for encryption and decryption.
 Therefore, the second 256 bits will be imported into Android's keystore for use with HMAC-SHA256,
-so that this key can act as a master key we can deterministically derive additional keys from.
+so that this key can act as a master key we can deterministically derive additional keys from
+by using HKDF ([RFC5869](https://tools.ietf.org/html/rfc5869)).
+
+For deriving keys, we are only using the HKDF's second 'expand' step,
+because the Android Keystore does not give us access
+to the key's byte representation (required for first 'extract' step) after importing it.
 
 ## Choice of primitives
 
@@ -129,16 +134,30 @@ on 64-bit ARMv8 CPUs that are used in modern phones.
 Our own tests against Java implementations of Blake2s, Blake3 and ChaCha20-Poly1305
 have confirmed that these indeed offer worse performance by a few factors.
 
+## Chunk ID calculation
+
+We use a keyed hash instead of a normal hash for calculating the chunk ID
+to not leak the file content via the public hash.
+Using HMAC-SHA256 directly with the master key in Android's key store
+resulted in terrible throughput of around 4 MB/sec.
+Java implementations of Blake2s and Blake3 performed better,
+but by far the best performance gave HMAC-SHA256
+with a key we can hold the byte representation for in memory.
+
+Therefore, we suggest to derive a dedicated key for chunk ID calculation from the master key
+and keep it in memory for as long as we need it.
+If an attacker is able to read our memory,
+they have access to the entire device anyway
+and there's no point anymore in protecting content indicators such as chunk hashes.
+
+To derive the chunk ID calculation key,
+we use HKDF with the UTF-8 byte representation of "Chunk ID calculation" as info input.
+
 ## Stream Encryption
 
 Each file/chunk written to backup storage will be encrypted with a fresh key
 to prevent issues with nonce/IV re-use of a single key.
-A fresh key will be derived from the master key
-by using HKDF ([RFC5869](https://tools.ietf.org/html/rfc5869)) with HMAC-SHA256.
-
-We are only using the HKDF's second 'expand' step,
-because the Android Keystore does not give us access
-to the key's byte representation (required for first 'extract' step) after importing it.
+A fresh key will be derived from the master key by using HKDF with HMAC-SHA256.
 A random 256 bit salt is used as info input to the HKDF.
 
 When a stream is written to backup storage,
