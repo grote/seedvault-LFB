@@ -99,7 +99,73 @@ and continue to download the ones that are still missing.
 After all files have been written to a directory,
 we might want to attempt to restore its metadata (and flags?) as well.
 
-TODO: figure out how to get the directories of `MediaStore` files.
+
+# Cryptography
+
+The goal here is to be as simple as possible while still being secure
+meaning that we want to primarily conceal the content of the backups.
+Certain trade-offs have to be made though,
+so that for now we do not attempt to hide file sizes
+which can especially be an issue for smaller files below the maximum chunk size.
+E.g. an attacker with access to the encrypted backup storage might be able to infer
+that the Snowden files are part of our backup.
+We do however encrypt file names and paths.
+
+## Master Key
+
+Seedvault uses [BIP39](https://github.com/bitcoin/bips/blob/master/bip-0039.mediawiki)
+to give users a mnemonic recovery code and for generating deterministic keys.
+The derived key has 512 bits
+and Seedvault uses the first 256 bits as an AES key to encrypt app data (out of scope here).
+This key's usage is limited by Android for encryption and decryption.
+Therefore, the second 256 bits will be imported into Android's keystore for use with HMAC-SHA256,
+so that this key can act as a master key we can deterministically derive additional keys from.
+
+## Choice of primitives
+
+AES-GCM and SHA256 have been chosen,
+because [both are hardware accelerated](https://en.wikichip.org/wiki/arm/armv8#ARMv8_Extensions_and_Processor_Features)
+on 64-bit ARMv8 CPUs that are used in modern phones.
+Our own tests against Java implementations of Blake2s, Blake3 and ChaCha20-Poly1305
+have confirmed that these indeed offer worse performance by a few factors.
+
+## Stream Encryption
+
+Each file/chunk written to backup storage will be encrypted with a fresh key
+to prevent issues with nonce/IV re-use of a single key.
+A fresh key will be derived from the master key
+by using HKDF ([RFC5869](https://tools.ietf.org/html/rfc5869)) with HMAC-SHA256.
+
+We are only using the HKDF's second 'expand' step,
+because the Android Keystore does not give us access
+to the key's byte representation (required for first 'extract' step) after importing it.
+A random 256 bit salt is used as info input to the HKDF.
+
+When a stream is written to backup storage,
+it starts with a header consisting of a single byte indicating the backup format version
+followed by the above salt, so we can later re-derive the key for decryption.
+After the first 33 header bytes, the ciphertext starts.
+
+Instead of encrypting, authenticating and segmenting a cleartext stream ourselves,
+we have chosen to employ the [tink library](https://github.com/google/tink) for that task.
+Since it does not allow us to work with imported or derived keys,
+we are only using its [AesGcmHkdfStreaming](https://google.github.io/tink/javadoc/tink-android/1.5.0/index.html?com/google/crypto/tink/subtle/AesGcmHkdfStreaming.html)
+to delegate encryption and decryption of byte streams.
+
+It adds its own 40 byte header consisting of header length (1 byte), salt and nonce prefix.
+Then it adds one or more segments, each up to 1 MB in size.
+All segments are encrypted with yet another key that is derived by using HKDF
+on our input key with another internal random salt (32 bytes) and associated data as info.
+We hope that this additional derivation performed by tink makes up
+for using only step 2 above to arrive at the input key.
+
+When writing chunk files to backup storage,
+the authenticated associated data (AAD) will contain the backup version as the first byte
+followed by the chunk ID to prevent an attacker from renaming and swapping chunks
+as well as downgrade attacks.
+The backup archive also contains the backup version byte and its own timestamp in AAD
+to prevent the same attacks.
+
 
 # Data structures
 
@@ -108,7 +174,8 @@ TODO: figure out how to get the directories of `MediaStore` files.
 ### Files cache
 
 This cache is needed to quickly look up if a file has changed and if we have all of its chunks.
-It will probably implemented as a sqlite-based Room database.
+It will probably be implemented as a sqlite-based Room database
+which has shown promising performance in early tests.
 
 Contents:
 
@@ -150,7 +217,15 @@ we can delete it from storage as it isn't used by a backup anymore.
 When making a backup pass and hitting the files cache,
 we need to check that all chunks are still available on storage.
 
-## Backup Archive
+## Remote Files
+
+All types of files written to backup storage have the following format:
+
+    ┏━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━┓
+    ┃ version byte ┃ 32 byte seed ┃ encrypted payload ┃
+    ┗━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━┛
+
+### Backup Archive
 
 The backup archive contains metadata about a single backup
 and is written to the storage after a successful backup run.
@@ -167,14 +242,30 @@ and is written to the storage after a successful backup run.
 * timeStart - when the backup run was started
 * timeEnd - when the backup run was finished
 
+TODO determine how this data will be serialized (e.g. JSON, protobuf, BDF)
+
+All backup archives are stored in an `/backups` folder.
+
+### Chunks
+
+The encrypted payload of chunks is just the chunk data itself.
+All chunks are stored in a `/chunks` folder.
+The file name is the chunk ID.
+
+TODO test how many chunks we can reasonably store in a single folder
+
 # Out-of-Scope
 
 The following features would be nice to have,
 but are considered out-of-scope of the current design for time and budget reasons.
 
 * compression (we initially assume that most files are already sufficiently compressed)
+* packing several smaller files into larger combined chunks to improve transfer efficiency
+* using a rolling hash to produce chunks in order to increase likelihood of obtaining same chunks
+  even if file contents change slightly or shift
 * external secret-less corruption checks that would use checksums over encrypted data
 * supporting different backup clients backing up to the same storage
+* concealing file sizes
 
 # Known issues
 
