@@ -113,7 +113,7 @@ We do however encrypt file names and paths.
 
 ## Master Key
 
-Seedvault uses [BIP39](https://github.com/bitcoin/bips/blob/master/bip-0039.mediawiki)
+Seedvault already uses [BIP39](https://github.com/bitcoin/bips/blob/master/bip-0039.mediawiki)
 to give users a mnemonic recovery code and for generating deterministic keys.
 The derived key has 512 bits
 and Seedvault uses the first 256 bits as an AES key to encrypt app data (out of scope here).
@@ -121,10 +121,14 @@ This key's usage is limited by Android for encryption and decryption.
 Therefore, the second 256 bits will be imported into Android's keystore for use with HMAC-SHA256,
 so that this key can act as a master key we can deterministically derive additional keys from
 by using HKDF ([RFC5869](https://tools.ietf.org/html/rfc5869)).
+These second 256 bits must not be used for any other purpose in the future.
+We use them for a master key to avoid users having to handle another secret.
 
 For deriving keys, we are only using the HKDF's second 'expand' step,
 because the Android Keystore does not give us access
 to the key's byte representation (required for first 'extract' step) after importing it.
+This should be fine as the input key material is already a cryptographically strong key
+(see section 3.3 of RFC 5869).
 
 ## Choice of primitives
 
@@ -157,34 +161,43 @@ we use HKDF with the UTF-8 byte representation of "Chunk ID calculation" as info
 
 Each file/chunk written to backup storage will be encrypted with a fresh key
 to prevent issues with nonce/IV re-use of a single key.
-A fresh key will be derived from the master key by using HKDF with HMAC-SHA256.
-A random 256 bit salt is used as info input to the HKDF.
+The fresh stream key is randomly generated and encrypted with a key-wrapping key
+according to [RFC 5649](https://tools.ietf.org/html/rfc5649)
+using an 8 byte IV.
+The key-wrapping key is derived from the master key by using HKDF with HMAC-SHA256
+like the chunk ID calculation key above.
+Here, the UTF-8 byte representation of "stream key wrapping" is used as info input.
 
 When a stream is written to backup storage,
 it starts with a header consisting of a single byte indicating the backup format version
-followed by the above salt, so we can later re-derive the key for decryption.
-After the first 33 header bytes, the ciphertext starts.
+followed by the encrypted stream key (40 bytes), so we can later re-derive the key for decryption.
+After the first 41 header bytes, the ciphertext starts.
 
 Instead of encrypting, authenticating and segmenting a cleartext stream ourselves,
 we have chosen to employ the [tink library](https://github.com/google/tink) for that task.
 Since it does not allow us to work with imported or derived keys,
 we are only using its [AesGcmHkdfStreaming](https://google.github.io/tink/javadoc/tink-android/1.5.0/index.html?com/google/crypto/tink/subtle/AesGcmHkdfStreaming.html)
 to delegate encryption and decryption of byte streams.
+This follows the OAE2 definition as proposed in the paper
+"Online Authenticated-Encryption and its Nonce-Reuse Misuse-Resistance"
+([PDF](https://eprint.iacr.org/2015/189.pdf)).
 
 It adds its own 40 byte header consisting of header length (1 byte), salt and nonce prefix.
 Then it adds one or more segments, each up to 1 MB in size.
 All segments are encrypted with yet another key that is derived by using HKDF
-on our input key with another internal random salt (32 bytes) and associated data as info.
-We hope that this additional derivation performed by tink makes up
-for using only step 2 above to arrive at the input key.
+on our stream key with another internal random salt (32 bytes) and associated data as info
+([documentation](https://github.com/google/tink/blob/master/docs/WIRE-FORMAT.md#streaming-encryption)).
 
-When writing chunk files to backup storage,
+When writing files/chunks to backup storage,
 the authenticated associated data (AAD) will contain the backup version as the first byte
-followed by the chunk ID to prevent an attacker from renaming and swapping chunks
-as well as downgrade attacks.
-The backup archive also contains the backup version byte and its own timestamp in AAD
-to prevent the same attacks.
+(to prevent downgrade attacks)
+followed by a second type byte depending on the type of file written:
 
+* chunks: `0x00` as type byte and then the chunk ID
+* backup archives: `0x01` as type byte and then the backup archive timestamp
+
+The chunk ID and the backup archive timestamp get added
+to prevent an attacker from renaming and swapping files/chunks.
 
 # Data structures
 
@@ -219,6 +232,13 @@ This could happen by checking a last seen timestamp or by using a TTL counter
 or maybe even a boolean flag that gets checked after a successful pass over all files.
 A flag might not be ideal if the user adds/removes folder as backup targets.
 
+The files cache is local only and will not be included in the backup.
+After restoring from backup the cache needs to get repopulated on the next backup run
+after re-generating the chunks cache.
+The URIs of the restored files will most likely differ from the backed up ones.
+When the `MediaStore` version changes,
+the chunk IDs of all files will need to get recalculated as well.
+
 ### Chunks cache
 
 This is used to determine whether we already have a chunk,
@@ -232,6 +252,11 @@ It could be implemented as a (joined?) table in the same database as the files c
 
 If the reference count of a chunk reaches `0`,
 we can delete it from storage as it isn't used by a backup anymore.
+
+References are only stored in this local chunks cache.
+If the cache is lost (or not available after restoring),
+it can be repopulated by inspecting all backup archives
+and setting the reference count to the number of backup archives a chunk is referenced from.
 
 When making a backup pass and hitting the files cache,
 we need to check that all chunks are still available on storage.
@@ -264,14 +289,16 @@ and is written to the storage after a successful backup run.
 TODO determine how this data will be serialized (e.g. JSON, protobuf, BDF)
 
 All backup archives are stored in an `/backups` folder.
+The filename is the timeStart timestamp.
 
 ### Chunks
 
 The encrypted payload of chunks is just the chunk data itself.
-All chunks are stored in a `/chunks` folder.
-The file name is the chunk ID.
-
-TODO test how many chunks we can reasonably store in a single folder
+All chunks are stored in one of 256 sub-folders
+representing the first byte of the chunk ID encoded as a hex string.
+The file name is the chunk ID encoded as a hex string.
+This is similar to how git stores its repository objects
+and to avoid having to store all chunks in a single directory.
 
 # Out-of-Scope
 
