@@ -265,9 +265,9 @@ we need to check that all chunks are still available on storage.
 
 All types of files written to backup storage have the following format:
 
-    ┏━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━┓
-    ┃ version byte ┃ 32 byte seed ┃ encrypted payload ┃
-    ┗━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━┛
+    ┏━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━┓
+    ┃ version byte ┃ encrypted stream key (40 bytes)  ┃ encrypted payload ┃
+    ┗━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━┛
 
 ### Backup Archive
 
