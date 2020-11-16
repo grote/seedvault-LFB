@@ -188,6 +188,13 @@ All segments are encrypted with yet another key that is derived by using HKDF
 on our stream key with another internal random salt (32 bytes) and associated data as info
 ([documentation](https://github.com/google/tink/blob/master/docs/WIRE-FORMAT.md#streaming-encryption)).
 
+A possible simplification could be to not use a new random stream key for each stream
+(which needs to get wrapped and included in the header),
+but to feed the derived key-wrapping key directly into AesGcmHkdfStreaming
+and call it stream key instead.
+Tink's AesGcmHkdfStreaming does a HKDF with the stream key as info
+and a random salt to derive a fresh "file key" for each stream.
+
 When writing files/chunks to backup storage,
 the authenticated associated data (AAD) will contain the backup version as the first byte
 (to prevent downgrade attacks)
