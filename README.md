@@ -331,6 +331,34 @@ The file name is the chunk ID encoded as a (lower-case) hex string.
 This is similar to how git stores its repository objects
 and to avoid having to store all chunks in a single directory.
 
+### Zip chunks
+
+Transferring many very small files causes a substantial overhead
+when transferring them to the storage medium.
+It would be nice to avoid that.
+Michael Rogers proposed the following idea to address this.
+
+A chunk can either be part of a large file, all of a medium-sized file,
+or a (deterministic) zip containing multiple small files.
+When creating a backup, we sort the files in the small category by last modification
+and pack as many files into each chunk as we can.
+Each small file will be stored in the zip chunk under some artificial name
+that is unique within the scope of the zip chunk like a counter.
+The path to unique name mapping will be stored in the backup snapshot (zip index).
+If a small file is inside a zip chunk,
+that chunk ID will be listed as the only chunk of the file in the backup snapshot
+and likewise for any other files inside that chunk.
+
+When creating the next backup, if none of the small files have changed,
+we just increase the ref count on the existing chunk.
+If some of them have changed, they will be added to a new zip chunk
+together with other new/changed small files.
+
+When fetching a chunk for restore, we know in advance whether it is a zip chunk,
+because the file we need it for contains the zip index,
+so we will not confuse it with a medium-sized zip file.
+Then we unzip the zip chunk and extract the file by its zip index (name).
+
 # Out-of-Scope
 
 The following features would be nice to have,
@@ -343,34 +371,6 @@ but are considered out-of-scope of the current design for time and budget reason
 * external secret-less corruption checks that would use checksums over encrypted data
 * supporting different backup clients backing up to the same storage
 * concealing file sizes (though zip chunks helps a bit here)
-
-## Idea for avoiding too many small chunks
-
-Transferring many very small files causes a substantial overhead
-when transferring them to the storage medium.
-It would be nice to avoid that.
-Michael Rogers proposed the following idea to address this.
-
-A chunk can either be part of a large file, all of a medium-sized file,
-or a (deterministic) zip containing multiple small files.
-When creating a backup, we sort the files in the small category by last modification
-and pack as many files into each chunk as we can.
-Each small file will be stored in the zip chunk under some artificial name
-that is unique within the scope of the zip chunk (like a counter).
-The path to unique name mapping will be stored in the backup snapshot (zipRef integer?).
-If a small file is inside a zip chunk,
-that chunk ID will be listed as the only chunk of the file in the backup snapshot
-and likewise for any other files inside that chunk.
-
-When creating the next backup, if none of the small files have changed,
-we just increase the ref count on the existing chunk.
-If some of them have changed, they will be added to a new zip chunk
-together with other new/changed small files.
-
-When fetching a chunk for restore, we know in advance whether it is a zip chunk,
-because the file we need it for has a counter to path mapping (zipRef),
-so we will not confuse it with a medium-sized zip file.
-Then we unzip the zip chunk and extract the file by counter/path.
 
 # Known issues
 
