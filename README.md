@@ -385,3 +385,18 @@ On Android 11, media files have a generation counter that gets incremented when 
 to help with this issue.
 However, files on external storage still don't have anything similar
 and usually also don't trigger `ContentObserver` notifications.
+
+# Acknowledgements
+
+The following individuals have reviewed this document and provided helpful feedback.
+
+* Demi M. Obenour
+* Chirayu Desai
+* Kevin Niehage
+* Michael Rogers
+* Thomas Waldmann
+* Tom Hacohen
+
+As they have reviewed different parts and different versions at different times,
+this acknowledgement should not be mistaken for their endorsement of the current design
+or the final implementation.
