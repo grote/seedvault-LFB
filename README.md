@@ -6,8 +6,23 @@ It is heavily inspired by borgbackup, but simplified and adapted to the Android 
 The aim is to efficiently backup media files from Android's `MediaStore`
 and other files from external storage.
 Apps and their data are explicitly out of scope
-as this is handled already by the Android backup system.
+as this is handled already by Seedvault via the Android backup system.
 Techniques introduced here might be applied to app backups in the future.
+
+## Terminology
+
+A **backup snapshot** (or short backup) represents a collection of files at one point in time.
+Making a backup creates such a snapshot and writes it to **backup storage**
+which is an abstract location to save files to (e.g. flash drive or cloud storage).
+Technically the backup snapshot is a file containing metadata
+about the backup such as the included files.
+A **backup run** is the process of backing up files i.e. making a backup.
+
+Large files are split into **chunks** by a **chunker**.
+Small files are combined to **zip chunks**.
+
+File information is cached locally in the **files cache** to speed up operations.
+There is also the **chunks cache** to cache information about chunks.
 
 # Operations
 
@@ -30,7 +45,7 @@ if its content-modification-indicating attributes have not been modified
 and all its chunks are still present in the backup storage.
 We might be able to speed up the latter check by initially retrieving a list of all chunks.
 
-For present unchanged files, an entry will be added to the backup metadata
+For present unchanged files, an entry will be added to the backup snapshot
 and the TTL in the files cache updated.
 If a file is not found in cache an entry will be added for it.
 New and modified files will be put through a chunker
@@ -42,16 +57,17 @@ A chunk is hashed (with a key / MACed),
 then (compressed and) encrypted (with authentication) and written to backup storage,
 if it is not already present.
 New chunks get added to the chunks cache.
-Only after the backup has completed and the backup archive was written,
+Only after the backup has completed and the backup snapshot was written,
 the reference counters of the included chunks will be incremented.
 
 When all chunks of a file have either been written or were present already,
-the file item is added to the backup archive with its list of chunk IDs and other metadata.
+the file metadata is added to the backup snapshot with its list of chunk IDs and other metadata.
 
-When all files have been processed, the backup archive is finalized and written to storage.
+When all files have been processed, the backup snapshot is finalized
+and written (encrypted) to storage.
 
-If the backup fails, a new run is attempted at the next opportunity creating a new backup archive.
-Chunks uploaded during the failed run should still be available in storage
+If the backup fails, a new run is attempted at the next opportunity creating a new backup snapshot.
+Chunks uploaded during the failed run should still be available in backup storage
 and the cache with reference count `0` providing an auto-resume.
 
 After a successful backup, chunks that still have reference count `0`
@@ -65,26 +81,28 @@ However, initially, we might simply auto-prune backups older than a month,
 if there have been at least 3 backups within that month (or some similar scheme).
 
 After doing a successful backup run, is a good time to prune old backups.
-To determine which backups to delete, the backup archives need to be downloaded and inspected.
+To determine which backups to delete, the backup snapshots need to be downloaded and inspected.
 Maybe their file name can be the `timeStart` timestamp to help with that task.
 If a backup is selected for deletion, the reference counter of all included chunks is decremented.
-The backup archive file and chunks with reference count of `0` are deleted from storage.
+The backup snapshot file and chunks with reference count of `0` are deleted from storage.
 
 ## Restoring from backup
 
-When the user wishes to restore a backup, they select the backup archive that should be used.
+When the user wishes to restore a backup, they select the backup snapshot that should be used.
 The selection can be done based on time and name.
-We go through the list of files in the archive,
+We go through the list of files in the snapshot,
 download, authenticate, decrypt (and decompress) each chunk of the file
 and re-assemble the file this way.
 Once we have the original chunk,
 we might want to re-calculate the chunk ID to check if it is as expected
 to prevent an attacker from swapping chunks.
-This could also be achieved by including the chunk ID in the authenticated encryption (e.g. AEAD).
+This could also be achieved by including the chunk ID
+in the associated data of the authenticated encryption (AEAD).
 The re-assembled file will be placed into the same directory under the same name
-with its attributes (e.g. lastModified) restored as much as possible.
+with its attributes (e.g. lastModified) restored as much as possible on Android.
 
-If a file already exists with the that name and path,
+Restoring to storage that is already in use is not supported.
+However, if a file already exists with the that name and path,
 we check if the file is identical to the one we want to restore
 (by relying on file metadata or re-computing chunk IDs)
 and move to the next if it is indeed identical.
@@ -103,11 +121,10 @@ we might want to attempt to restore its metadata (and flags?) as well.
 # Cryptography
 
 The goal here is to be as simple as possible while still being secure
-meaning that we want to primarily conceal the content of the backups.
+meaning that we want to primarily conceal the content of the backed up files.
 Certain trade-offs have to be made though,
-so that for now we do not attempt to hide file sizes
-which can especially be an issue for smaller files below the maximum chunk size.
-E.g. an attacker with access to the encrypted backup storage might be able to infer
+so that for now we do not attempt to hide file sizes.
+E.g. an attacker with access to the backup storage might be able to infer
 that the Snowden files are part of our backup.
 We do however encrypt file names and paths.
 
@@ -128,7 +145,7 @@ For deriving keys, we are only using the HKDF's second 'expand' step,
 because the Android Keystore does not give us access
 to the key's byte representation (required for first 'extract' step) after importing it.
 This should be fine as the input key material is already a cryptographically strong key
-(see section 3.3 of RFC 5869).
+(see section 3.3 of RFC 5869 above).
 
 ## Choice of primitives
 
@@ -137,6 +154,8 @@ because [both are hardware accelerated](https://en.wikichip.org/wiki/arm/armv8#A
 on 64-bit ARMv8 CPUs that are used in modern phones.
 Our own tests against Java implementations of Blake2s, Blake3 and ChaCha20-Poly1305
 have confirmed that these indeed offer worse performance by a few factors.
+C implementations via JNI have not been evaluated though
+due to difficulties of building those as part of AOSP.
 
 ## Chunk ID calculation
 
@@ -154,24 +173,20 @@ If an attacker is able to read our memory,
 they have access to the entire device anyway
 and there's no point anymore in protecting content indicators such as chunk hashes.
 
-To derive the chunk ID calculation key,
-we use HKDF with the UTF-8 byte representation of "Chunk ID calculation" as info input.
+To derive the chunk ID calculation key, we use HKDF's expand step
+with the UTF-8 byte representation of "Chunk ID calculation" as info input.
 
 ## Stream Encryption
 
-Each file/chunk written to backup storage will be encrypted with a fresh key
-to prevent issues with nonce/IV re-use of a single key.
-The fresh stream key is randomly generated and encrypted with a key-wrapping key
-according to [RFC 5649](https://tools.ietf.org/html/rfc5649)
-using an 8 byte IV.
-The key-wrapping key is derived from the master key by using HKDF with HMAC-SHA256
-like the chunk ID calculation key above.
-Here, the UTF-8 byte representation of "stream key wrapping" is used as info input.
-
 When a stream is written to backup storage,
 it starts with a header consisting of a single byte indicating the backup format version
-followed by the encrypted stream key (40 bytes), so we can later re-derive the key for decryption.
-After the first 41 header bytes, the ciphertext starts.
+followed by the encrypted payload.
+
+Each chunk and backup snapshot written to backup storage will be encrypted with a fresh key
+to prevent issues with nonce/IV re-use of a single key.
+Similar to the chunk ID calculation key above, we derive a stream key from the master key
+by using HKDF's expand step with the UTF-8 byte representation of "stream key" as info input.
+This stream key is then used to derive a new key for each stream.
 
 Instead of encrypting, authenticating and segmenting a cleartext stream ourselves,
 we have chosen to employ the [tink library](https://github.com/google/tink) for that task.
@@ -184,16 +199,9 @@ This follows the OAE2 definition as proposed in the paper
 
 It adds its own 40 byte header consisting of header length (1 byte), salt and nonce prefix.
 Then it adds one or more segments, each up to 1 MB in size.
-All segments are encrypted with yet another key that is derived by using HKDF
+All segments are encrypted with a fresh key that is derived by using HKDF
 on our stream key with another internal random salt (32 bytes) and associated data as info
 ([documentation](https://github.com/google/tink/blob/master/docs/WIRE-FORMAT.md#streaming-encryption)).
-
-A possible simplification could be to not use a new random stream key for each stream
-(which needs to get wrapped and included in the header),
-but to feed the derived key-wrapping key directly into AesGcmHkdfStreaming
-and call it stream key instead.
-Tink's AesGcmHkdfStreaming does a HKDF with the stream key as info
-and a random salt to derive a fresh "file key" for each stream.
 
 When writing files/chunks to backup storage,
 the authenticated associated data (AAD) will contain the backup version as the first byte
@@ -201,9 +209,9 @@ the authenticated associated data (AAD) will contain the backup version as the f
 followed by a second type byte depending on the type of file written:
 
 * chunks: `0x00` as type byte and then the chunk ID
-* backup archives: `0x01` as type byte and then the backup archive timestamp
+* backup snapshots: `0x01` as type byte and then the backup snapshot timestamp
 
-The chunk ID and the backup archive timestamp get added
+The chunk ID and the backup snapshot timestamp get added
 to prevent an attacker from renaming and swapping files/chunks.
 
 # Data structures
@@ -221,10 +229,10 @@ Contents:
 * URI (stripped by scheme and authority?) (`String` with index for fast lookups)
 * file size (`Long`)
 * last modified in milliseconds (`Long`)
-* generation added (MediaStore only) (`Long`)
 * generation modified (MediaStore only) (`Long`)
 * list of chunk IDs representing the file's contents
-* last seen in milliseconds (`Long`) or TTL counter (`Integer`)
+* zip index in case this file is inside a single zip chunk (`Integer`)
+* last seen in milliseconds (`Long`)
 
 If the file's size, last modified timestamp (and generation) is still the same,
 it is considered to not have changed.
@@ -232,12 +240,13 @@ In that case, we check that all file content chunks are (still) present in stora
 
 If the file has not changed and all chunks are present,
 the file is not read/chunked/hashed again.
-Only a file metadata item is added to backup metadata.
+Only file metadata is added to the backup snapshot.
 
 As the cache grows over time, we need a way to evict files eventually.
 This could happen by checking a last seen timestamp or by using a TTL counter
-or maybe even a boolean flag that gets checked after a successful pass over all files.
+or maybe even a boolean flag that gets checked after a successful run over all files.
 A flag might not be ideal if the user adds/removes folder as backup targets.
+Current preference is for using a last seen timestamp.
 
 The files cache is local only and will not be included in the backup.
 After restoring from backup the cache needs to get repopulated on the next backup run
@@ -251,51 +260,66 @@ the chunk IDs of all files will need to get recalculated as well.
 This is used to determine whether we already have a chunk,
 to count references to it and also for statistics.
 
-It could be implemented as a (joined?) table in the same database as the files cache.
+It could be implemented as a table in the same database as the files cache.
 
-* chunk ID (probably a hash/mac)
+* chunk ID (hex representation of the chunk's MAC)
 * reference count
 * size
 
 If the reference count of a chunk reaches `0`,
-we can delete it from storage as it isn't used by a backup anymore.
+we can delete it from storage (after a successful backup)
+as it isn't used by a backup anymore.
 
 References are only stored in this local chunks cache.
 If the cache is lost (or not available after restoring),
-it can be repopulated by inspecting all backup archives
-and setting the reference count to the number of backup archives a chunk is referenced from.
+it can be repopulated by inspecting all backup snapshots
+and setting the reference count to the number of backup snapshots a chunk is referenced from.
 
-When making a backup pass and hitting the files cache,
+When making a backup run and hitting the files cache,
 we need to check that all chunks are still available on storage.
 
 ## Remote Files
 
 All types of files written to backup storage have the following format:
 
-    ┏━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━┓
-    ┃ version byte ┃ encrypted stream key (40 bytes)  ┃ encrypted payload ┃
-    ┗━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━┛
+    ┏━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+    ┃         ┃ tink payload (with 40 bytes header)                          ┃
+    ┃ version ┃ ┏━━━━━━━━━━━━━━━┳━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━┓ ┃
+    ┃  byte   ┃ ┃ header length ┃ salt ┃ nonce prefix ┃ encrypted segments ┃ ┃
+    ┃         ┃ ┗━━━━━━━━━━━━━━━┻━━━━━━┻━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━┛ ┃
+    ┗━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 
-### Backup Archive
+### Backup Snapshot
 
-The backup archive contains metadata about a single backup
+The backup snapshot contains metadata about a single backup
 and is written to the storage after a successful backup run.
 
 * version - the backup version
 * name - a name of the backup
-* files - a list of all files in this backup
-  * URI (includes authority and storage volume)
-  * relative path
-  * name
-  * file size
+* media files - a list of all `MediaStore` files in this backup
+  * media type (enum: images, video, audio or downloads)
+  * name (string)
+  * relative path (string)
+  * last modified timestamp (long)
+  * owner package name (string)
+  * is favorite (boolean)
+  * file size (long)
+  * storage volume (string)
   * ordered list of chunk IDs (to re-assemble the file)
+  * zip index (int)
+* document files - a list of all document files from external storage in this backup
+  * name (string)
+  * relative path (string)
+  * last modified timestamp (long)
+  * file size (long)
+  * storage volume (string)
+  * ordered list of chunk IDs (to re-assemble the file)
+  * zip index (int)
 * total size - sum of the size of all files, for stats
 * timeStart - when the backup run was started
 * timeEnd - when the backup run was finished
 
-TODO determine how this data will be serialized (e.g. JSON, protobuf, BDF)
-
-All backup archives are stored in an `/backups` folder.
+All backup snapshots are stored in the root folder.
 The filename is the timeStart timestamp.
 
 ### Chunks
@@ -303,7 +327,7 @@ The filename is the timeStart timestamp.
 The encrypted payload of chunks is just the chunk data itself.
 All chunks are stored in one of 256 sub-folders
 representing the first byte of the chunk ID encoded as a hex string.
-The file name is the chunk ID encoded as a hex string.
+The file name is the chunk ID encoded as a (lower-case) hex string.
 This is similar to how git stores its repository objects
 and to avoid having to store all chunks in a single directory.
 
@@ -318,7 +342,7 @@ but are considered out-of-scope of the current design for time and budget reason
   even if file contents change slightly or shift
 * external secret-less corruption checks that would use checksums over encrypted data
 * supporting different backup clients backing up to the same storage
-* concealing file sizes
+* concealing file sizes (though zip chunks helps a bit here)
 
 ## Idea for avoiding too many small chunks
 
@@ -333,9 +357,9 @@ When creating a backup, we sort the files in the small category by last modifica
 and pack as many files into each chunk as we can.
 Each small file will be stored in the zip chunk under some artificial name
 that is unique within the scope of the zip chunk (like a counter).
-The path to unique name mapping will be stored in the backup archive (zipRef integer?).
+The path to unique name mapping will be stored in the backup snapshot (zipRef integer?).
 If a small file is inside a zip chunk,
-that chunk ID will be listed as the only chunk of the file in the backup metadata
+that chunk ID will be listed as the only chunk of the file in the backup snapshot
 and likewise for any other files inside that chunk.
 
 When creating the next backup, if none of the small files have changed,
